@@ -5,8 +5,20 @@ Gets to 99.25% test accuracy after 12 epochs
 '''
 from __future__ import print_function
 import os
+import argparse
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+parser = argparse.ArgumentParser()
+parser.add_argument('--notsherpa', help='Do not import Sherpa', action='store_true', default=False)
+parser.add_argument('--gpu', type=str, default='')
+args, unknown = parser.parse_known_args()
+
+import sherpa
+client = sherpa.Client(test_mode=args.notsherpa)
+trial = client.get_trial()
+
+gpu = os.environ.get("SHERPA_RESOURCE", '')
+
+os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu or args.gpu)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
 CONFIG = tf.ConfigProto(device_count = {'GPU': 1}, log_device_placement=False, allow_soft_placement=False)
@@ -21,15 +33,11 @@ from keras.datasets import mnist
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Flatten
 from keras.layers import Conv2D, MaxPooling2D
+from keras.callbacks import ModelCheckpoint
 from keras import backend as K
+from keras.models import load_model
 import numpy as np
 from sklearn.utils import shuffle
-
-################## Sherpa trial ##################
-import sherpa
-client = sherpa.Client()
-trial = client.get_trial()  # contains ID and parameters
-##################################################
 
 batch_size = 128
 num_classes = 10
@@ -40,6 +48,7 @@ img_rows, img_cols = 28, 28
 
 # the data, shuffled and split between train and test sets
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
+# x_train, y_train = shuffle(x_train, y_train)
 
 if K.image_data_format() == 'channels_first':
     x_train = x_train.reshape(x_train.shape[0], 1, img_rows, img_cols)
@@ -58,13 +67,6 @@ print('x_train shape:', x_train.shape)
 print(x_train.shape[0], 'train samples')
 print(x_test.shape[0], 'test samples')
 
-# def generator(X, y):
-#     nbatches = X.shape[0]//batch_size
-#     while True:
-#         X, y = shuffle(X, y)
-#         for i in range(nbatches-1):
-#             yield X[i*batch_size:(i+1)*batch_size], y[i*batch_size:(i+1)*batch_size]
-
 # convert class vectors to binary class matrices
 y_train = keras.utils.to_categorical(y_train, num_classes)
 y_test = keras.utils.to_categorical(y_test, num_classes)
@@ -75,30 +77,31 @@ model.add(Conv2D(32, kernel_size=(3, 3),
                  input_shape=input_shape))
 model.add(Conv2D(64, (3, 3), activation='relu'))
 model.add(MaxPooling2D(pool_size=(2, 2)))
-model.add(Dropout(trial.parameters['dropout']))
+model.add(Dropout(trial.parameters.get('dropout', 0.1)))
 model.add(Flatten())
 model.add(Dense(128, activation='relu'))
-model.add(Dropout(trial.parameters['top_dropout']))
+model.add(Dropout(trial.parameters.get('top_dropout', 0.1)))
 model.add(Dense(num_classes, activation='softmax'))
 
 model.compile(loss=keras.losses.categorical_crossentropy,
-              optimizer=keras.optimizers.SGD(lr=trial.parameters['lr'], momentum=0.7,
-                                             decay=trial.parameters['lr_decay']),
-              metrics=['accuracy'])
+              optimizer=keras.optimizers.SGD(lr=trial.parameters.get('lr',0.01), momentum=0.7,
+                                             decay=trial.parameters.get('lr_decay',0.)), metrics=['acc'])
 
+model_path = os.path.join(os.environ.get("SHERPA_OUTPUT_DIR", '/tmp/'), str(trial.id) + ".hdf5")
+checkpointer = ModelCheckpoint(filepath=model_path, verbose=1, save_best_only=True)
 
-model.fit(x_train, y_train,
-          batch_size=batch_size,
-          epochs=epochs,
-          verbose=2,
-          callbacks=[client.keras_send_metrics(trial, objective_name='val_loss', context_names=['val_acc', 'loss', 'acc'])],
-          validation_data=(x_test, y_test))
-# model.fit_generator(generator(x_train, y_train),
-#                     steps_per_epoch=x_train.shape[0]//batch_size//15,
-#                     validation_data=generator(x_test, y_test),
-#                     validation_steps=x_test.shape[0]//batch_size//15,
-#                     callbacks=[client.keras_send_metrics(trial, objective_name='val_loss', context_names=['val_acc'])],
-#                     epochs=epochs)
-# score = model.evaluate(x_test, y_test, verbose=0)
-# print('Test loss:', score[0])
-# print('Test accuracy:', score[1])
+print('Train...')
+history = model.fit(x_train, y_train,
+                    batch_size=batch_size,
+                    epochs=epochs,
+                    verbose=2,
+                    validation_split=0.2,
+                    callbacks=[checkpointer])
+best_val_loss = min(history.history['val_loss'])
+model = load_model(model_path)
+score, acc = model.evaluate(x_test, y_test,
+                            batch_size=batch_size)
+print("Score: ", score, "Acc: ", acc)
+client.send_metrics(trial=trial, iteration=epochs, objective=best_val_loss, context={'test_loss': score, 'test_acc': acc})
+
+os.remove(model_path)
