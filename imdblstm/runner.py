@@ -43,16 +43,17 @@ def run_example(FLAGS):
         sched = SGEScheduler(environment=env, submit_options=opt)
     else:
         # Run on local machine.
-        sched = LocalScheduler(resources=[0,1,2,3])
+        resources = [int(x) for x in FLAGS.gpus.split(',')]
+        sched = LocalScheduler(resources=resources)
 
     rval = sherpa.optimize(parameters=parameters,
                            algorithm=alg,
                            lower_is_better=False,
-                           filename='trial_multiple_populations.py',
+                           filename='trials.py',
                            scheduler=sched,
                            verbose=0,
                            max_concurrent=FLAGS.max_concurrent,
-                           output_dir='./output_multiple_hypotheses_cudnn_gpu{}_{}'.format(FLAGS.gpu, time.strftime("%Y-%m-%d--%H:%M")))
+                           output_dir='./output_imdb_{}_{}_gpu-{}'.format(time.strftime("%Y-%m-%d--%H-%M-%S"), FLAGS.name, FLAGS.gpus.replace(',', '-')))
     print('Best results:')
     print(rval)
 
@@ -74,9 +75,10 @@ if __name__=='__main__':
                         default="hostname=\'arcus-1\'")
     parser.add_argument('--env', help='Your environment path.',
                         default='/home/lhertel/profiles/python3env.profile', type=str)
-    parser.add_argument('--gpu', help='Which GPU to run on.',
-                    default='0', type=str)
-    parser.add_argument('--studyname', help='name for output folder', type=str, default='')
+    parser.add_argument('--gpus',
+                        help='Available gpus separated by comma.',
+                        type=str, default='')
+    parser.add_argument('--name', help='name for output folder', type=str, default='')
     parser.add_argument('--algorithm', type=str, default='BayesianOptimization')
     FLAGS = parser.parse_args()
     run_example(FLAGS)  # Sherpa optimization.
